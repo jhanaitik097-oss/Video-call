@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CallMe 📹 | Glass</title>
+
+<!-- Firebase -->
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+
+<style>
+*{box-sizing:border-box}
+
+body{
+  margin:0;
+  min-height:100vh;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-family:-apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui;
+  background:
+    radial-gradient(circle at top,#7b7bff55,transparent 60%),
+    linear-gradient(135deg,#0b1320,#1b2a3a,#2b4455);
+  color:#fff;
+  overflow:hidden;
+}
+
+/* Ambient floating glow */
+body::before{
+  content:"";
+  position:absolute;
+  inset:-50%;
+  background:radial-gradient(circle,#7b7bff33,transparent 70%);
+  animation:spin 22s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Glass Card */
+.card{
+  position:relative;
+  width:94%;
+  max-width:440px;
+  padding:28px;
+  border-radius:30px;
+  background:rgba(255,255,255,.14);
+  backdrop-filter:blur(28px) saturate(180%);
+  -webkit-backdrop-filter:blur(28px) saturate(180%);
+  border:1px solid rgba(255,255,255,.2);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.3),
+    0 50px 100px rgba(0,0,0,.6);
+  text-align:center;
+  z-index:1;
+}
+
+h2{
+  margin:4px 0;
+  font-size:23px;
+  font-weight:700;
+  letter-spacing:.3px;
+}
+p{
+  margin:0;
+  font-size:13px;
+  opacity:.8;
+}
+
+/* Videos */
+.videos{
+  display:flex;
+  gap:12px;
+  margin:20px 0;
+}
+video{
+  width:50%;
+  height:155px;
+  border-radius:22px;
+  background:#000;
+  object-fit:cover;
+  transform:scaleX(-1);
+  box-shadow:0 15px 40px rgba(0,0,0,.5);
+}
+
+/* Buttons */
+button{
+  width:100%;
+  padding:15px;
+  margin-top:10px;
+  border:none;
+  border-radius:18px;
+  font-size:15px;
+  font-weight:600;
+  cursor:pointer;
+  color:#fff;
+  background:linear-gradient(135deg,#7b7bff,#9a8cff);
+  box-shadow:0 12px 30px rgba(123,123,255,.5);
+  transition:.25s ease;
+}
+button:hover{transform:translateY(-2px)}
+button:disabled{
+  opacity:.4;
+  pointer-events:none;
+}
+
+button.end{
+  background:linear-gradient(135deg,#ff4d4d,#ff7676);
+  box-shadow:0 12px 30px rgba(255,80,80,.5);
+}
+
+.status{
+  margin-top:14px;
+  font-size:13px;
+  min-height:18px;
+  opacity:.9;
+}
+
+#linkBox{
+  font-size:12px;
+  word-break:break-all;
+  margin-top:10px;
+  opacity:.85;
+}
+</style>
+</head>
+
+<body>
+<div class="card">
+  <h2>CallMe 📹</h2>
+  <p>Private · Smooth · Glass</p>
+
+  <div class="videos">
+    <video id="localVideo" autoplay muted playsinline></video>
+    <video id="remoteVideo" autoplay playsinline></video>
+  </div>
+
+  <button id="createBtn">Create Call Link 🔗</button>
+  <button id="joinBtn">Join Call 🚀</button>
+  <button id="endBtn" class="end" disabled>End Call ❌</button>
+
+  <div id="linkBox"></div>
+  <div id="status" class="status">Idle…</div>
+</div>
+
+<script>
+/* ================= FIREBASE ================= */
+firebase.initializeApp({
+  apiKey: "AIzaSyDyRni4pAbF7fDintA8wyKtan2gdzcbZgc",
+  authDomain: "call-f5c7d.firebaseapp.com",
+  databaseURL: "https://call-f5c7d-default-rtdb.firebaseio.com",
+  projectId: "call-f5c7d",
+  storageBucket: "call-f5c7d.appspot.com",
+  messagingSenderId: "583755464446",
+  appId: "1:583755464446:web:7a8b840ed4b61827c36faf"
+});
+const db = firebase.database();
+
+/* ================= GLOBAL ================= */
+let pc, localStream, roomId;
+let iceQueue=[], remoteDesc=false;
+
+const $ = id=>document.getElementById(id);
+const statusEl = $("status");
+
+/* ================= MEDIA ================= */
+async function setupMedia(){
+  if(localStream) return;
+  localStream = await navigator.mediaDevices.getUserMedia({video:true,audio:true});
+  $("localVideo").srcObject = localStream;
+}
+
+/* ================= PEER ================= */
+function createPeer(roomRef,isCaller){
+  pc = new RTCPeerConnection({
+    iceServers:[{urls:"stun:stun.l.google.com:19302"}]
+  });
+
+  localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
+
+  pc.ontrack = e => $("remoteVideo").srcObject = e.streams[0];
+
+  const localIce = roomRef.child(isCaller?"callerIce":"calleeIce");
+  const remoteIce = roomRef.child(isCaller?"calleeIce":"callerIce");
+
+  pc.onicecandidate = e=>{
+    if(e.candidate) localIce.push(e.candidate.toJSON());
+  };
+
+  remoteIce.on("child_added", s=>{
+    const c = new RTCIceCandidate(s.val());
+    remoteDesc ? pc.addIceCandidate(c) : iceQueue.push(c);
+  });
+}
+
+/* ================= CREATE ================= */
+async function createCall(){
+  if(pc) return;
+  roomId = "room-"+crypto.randomUUID().slice(0,8);
+
+  const link = location.origin + location.pathname + "?room=" + roomId;
+  $("linkBox").textContent = link;
+
+  statusEl.textContent="Creating call…";
+  await setupMedia();
+
+  const roomRef = db.ref("rooms/"+roomId);
+  createPeer(roomRef,true);
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await roomRef.set({offer});
+
+  roomRef.child("answer").on("value", async s=>{
+    if(s.exists() && !remoteDesc){
+      await pc.setRemoteDescription(new RTCSessionDescription(s.val()));
+      remoteDesc = true;
+      iceQueue.forEach(c=>pc.addIceCandidate(c));
+      iceQueue=[];
+      statusEl.textContent="Connected ✨";
+      $("endBtn").disabled=false;
+    }
+  });
+}
+
+/* ================= JOIN ================= */
+async function joinCall(){
+  if(pc) return;
+  roomId = new URLSearchParams(location.search).get("room");
+  if(!roomId) return alert("No call link");
+
+  statusEl.textContent="Joining call…";
+  await setupMedia();
+
+  const roomRef = db.ref("rooms/"+roomId);
+  const snap = await roomRef.get();
+  if(!snap.exists()) return alert("Call not found");
+
+  createPeer(roomRef,false);
+  await pc.setRemoteDescription(new RTCSessionDescription(snap.val().offer));
+  remoteDesc=true;
+
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  await roomRef.update({answer});
+
+  iceQueue.forEach(c=>pc.addIceCandidate(c));
+  iceQueue=[];
+  statusEl.textContent="Connected ✨";
+  $("endBtn").disabled=false;
+}
+
+/* ================= END ================= */
+function endCall(){
+  if(pc){pc.close();pc=null}
+  if(localStream){
+    localStream.getTracks().forEach(t=>t.stop());
+    localStream=null;
+  }
+  $("localVideo").srcObject=null;
+  $("remoteVideo").srcObject=null;
+  statusEl.textContent="Call Ended ❌";
+  $("endBtn").disabled=true;
+}
+
+/* ================= EVENTS ================= */
+$("createBtn").onclick=createCall;
+$("joinBtn").onclick=joinCall;
+$("endBtn").onclick=endCall;
+
+/* Auto join */
+if(new URLSearchParams(location.search).get("room")){
+  joinCall();
+}
+</script>
+</body>
+</html>
